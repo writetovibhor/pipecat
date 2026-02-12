@@ -24,6 +24,22 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
+
+def _configure_cert_store():
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE"):
+        return
+    try:
+        import certifi
+    except Exception as exc:
+        logger.warning("Cert store not configured (certifi unavailable): %s", exc)
+        return
+    cert_path = certifi.where()
+    os.environ["SSL_CERT_FILE"] = cert_path
+    os.environ["REQUESTS_CA_BUNDLE"] = cert_path
+
+
+_configure_cert_store()
+
 print("🚀 Starting Pipecat bot...")
 print("⏳ Loading models and imports (20 seconds, first run only)\n")
 
