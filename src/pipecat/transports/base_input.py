@@ -28,7 +28,7 @@ from pipecat.frames.frames import (
     EmulateUserStartedSpeakingFrame,
     EmulateUserStoppedSpeakingFrame,
     EndFrame,
-    FilterUpdateSettingsFrame,
+    FilterControlFrame,
     Frame,
     InputAudioRawFrame,
     InputImageRawFrame,
@@ -383,7 +383,7 @@ class BaseInputTransport(FrameProcessor):
                     else None,
                 )
         ###################################################################
-        elif isinstance(frame, FilterUpdateSettingsFrame) and self._params.audio_in_filter:
+        elif isinstance(frame, FilterControlFrame) and self._params.audio_in_filter:
             await self._params.audio_in_filter.process_frame(frame)
         # Other frames
         else:

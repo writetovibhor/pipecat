@@ -38,8 +38,16 @@ source .venv/bin/activate
 ```bash
 uv pip install -e "../../[websocket,deepgram,cartesia,silero]"
 uv pip install fastapi "uvicorn[standard]" python-dotenv aiofiles \
-               google-genai google-cloud-speech google-cloud-texttospeech
+               google-genai google-cloud-speech google-cloud-texttospeech numpy
 ```
+
+**Optional — DeepFilterNet noise suppression:**
+
+```bash
+uv pip install deepfilternet
+```
+
+If `deepfilternet` is not installed the toggle in the UI is still visible but has no effect (audio passes through unmodified).
 
 ### 3. Configure API keys
 
@@ -99,6 +107,10 @@ WAV file → 16 kHz Float32           FastAPIWebsocketTransport
   (also played locally               InputAudioRawFrame
    via monitorCtx)                     │
                                        ▼
+                              [DeepFilterNetFilter]  ← optional noise suppression
+                              (toggled by UI checkbox)
+                                       │
+                                       ▼
                                      DeepgramSTTService  (STT)
                                        │ TranscriptionFrame
                                        ▼
@@ -142,8 +154,16 @@ WAV file → 16 kHz Float32           FastAPIWebsocketTransport
 | Direction | Format | Content |
 |---|---|---|
 | Client → Server | Binary | Raw PCM Int16, 16 kHz, mono, 10 ms chunks (320 bytes) |
+| Client → Server | Text (JSON) | Control messages (e.g. DeepFilter toggle) |
 | Server → Client | Binary | Raw PCM Int16, 16 kHz, mono (TTS audio) |
 | Server → Client | Text (JSON) | Status/transcript events (see below) |
+
+### Client → Server JSON messages
+
+```jsonc
+{ "type": "deepfilter_toggle", "enable": true  }  // enable noise suppression
+{ "type": "deepfilter_toggle", "enable": false }  // disable noise suppression
+```
 
 ### Server → Client JSON events
 

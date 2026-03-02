@@ -87,6 +87,51 @@ html, body {
   50%       { opacity: 0.2; }
 }
 
+/* ── DeepFilter toggle chip ── */
+.filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+.filter-chip input { display: none; }
+
+.filter-chip-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  transition: background 0.2s, border-color 0.2s;
+}
+.filter-chip-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.2s, background 0.2s;
+}
+.filter-chip input:checked ~ .filter-chip-track {
+  background: var(--green-dim);
+  border-color: var(--green);
+}
+.filter-chip input:checked ~ .filter-chip-track .filter-chip-thumb {
+  transform: translateX(16px);
+  background: var(--green);
+}
+.filter-chip-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: color 0.2s;
+}
+.filter-chip input:checked ~ .filter-chip-label { color: var(--green); }
+
 /* ── Buttons ── */
 .btn {
   padding: 7px 16px;
@@ -662,3 +707,51 @@ html, body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Snapshot comparison panel ── */
+.compare-panel {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.compare-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--surface2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.compare-body { overflow-x: auto; }
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.compare-table th, .compare-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.compare-table thead th {
+  background: var(--surface);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 11px;
+}
+.compare-metric-col { width: 140px; min-width: 140px; }
+.compare-val-col    { min-width: 180px; }
+.compare-delta-col  { min-width: 100px; }
+.cmp-label { color: var(--text-muted); }
+.cmp-val   { color: var(--text); font-variant-numeric: tabular-nums; }
+.cmp-delta { font-weight: 600; font-variant-numeric: tabular-nums; }
+.cmp-good  { color: var(--green); }
+.cmp-bad   { color: var(--red); }
+.cmp-muted { color: var(--text-muted); font-style: italic; font-weight: 400; }
+.compare-table tr:last-child td { border-bottom: none; }
+.compare-table tbody tr:hover { background: var(--surface2); }

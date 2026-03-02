@@ -17,6 +17,7 @@
 #   uvicorn bot:app --host 0.0.0.0 --port 7860 --reload
 #
 
+import asyncio
 import json
 import os
 import re
@@ -24,6 +25,16 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+import numpy as np
+
+try:
+    import torch
+    from df import enhance as df_enhance
+    from df import init_df as df_init_df
+    _DEEPFILTER_AVAILABLE = True
+except ModuleNotFoundError:
+    _DEEPFILTER_AVAILABLE = False
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
@@ -36,11 +47,13 @@ load_dotenv(override=True)
 # ---------------------------------------------------------------------------
 # Pipecat imports
 # ---------------------------------------------------------------------------
+from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    FilterEnableFrame,
     Frame,
     InputAudioRawFrame,
     InterimTranscriptionFrame,
@@ -83,6 +96,137 @@ def _iter_wav_files(root: Path) -> Iterator[Path]:
                 yield Path(dirpath) / fname
 
 # ---------------------------------------------------------------------------
+# DeepFilterNet noise suppression filter
+# ---------------------------------------------------------------------------
+
+
+class DeepFilterNetFilter(BaseAudioFilter):
+    """Real-time noise suppression using DeepFilterNet.
+
+    Wraps the `deepfilternet` Python package. Requires 48 kHz internally;
+    resamples automatically when the transport runs at a different rate.
+    Toggle at runtime via FilterEnableFrame.
+    """
+
+    def __init__(
+        self,
+        atten_lim_db: Optional[float] = None,
+        resampler_quality: str = "QQ",
+    ) -> None:
+        self._filtering = False  # off by default; UI toggles it on
+        self._atten_lim_db = atten_lim_db
+        self._resampler_quality = resampler_quality
+        self._sample_rate = 0
+        self._model = None
+        self._df_state = None
+        self._model_ready = False
+        self._resampler_in = None
+        self._resampler_out = None
+
+    async def start(self, sample_rate: int):
+        self._sample_rate = sample_rate
+
+        if not _DEEPFILTER_AVAILABLE:
+            logger.warning(
+                "DeepFilterNet not installed — noise suppression unavailable. "
+                "Run: pip install deepfilternet"
+            )
+            return
+
+        logger.info("DeepFilterNet: loading model (may download on first run) …")
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, lambda: df_init_df(log_level="WARNING")
+            )
+            self._model, self._df_state, *_ = result
+            self._model_ready = True
+            logger.info(
+                f"DeepFilterNet ready (model sr={self._df_state.sr()} Hz, "
+                f"transport sr={sample_rate} Hz)"
+            )
+        except Exception as e:
+            logger.error(f"DeepFilterNet init failed: {e}")
+            return
+
+        if sample_rate != 48000:
+            try:
+                from pipecat.audio.resamplers.soxr_stream_resampler import (
+                    SOXRStreamAudioResampler,
+                )
+
+                self._resampler_in = SOXRStreamAudioResampler(
+                    quality=self._resampler_quality
+                )
+                self._resampler_out = SOXRStreamAudioResampler(
+                    quality=self._resampler_quality
+                )
+                logger.info(
+                    f"DeepFilterNet: resampling {sample_rate} ↔ 48 000 Hz"
+                )
+            except ImportError as e:
+                logger.error(f"DeepFilterNet: resampler not available: {e}")
+                self._model_ready = False
+
+    async def stop(self):
+        self._model = None
+        self._df_state = None
+        self._model_ready = False
+        self._resampler_in = None
+        self._resampler_out = None
+
+    async def process_frame(self, frame):
+        if isinstance(frame, FilterEnableFrame):
+            self._filtering = frame.enable
+            logger.info(
+                f"DeepFilterNet: {'enabled' if frame.enable else 'disabled'}"
+            )
+
+    def _run_enhance(self, audio_tensor):
+        return df_enhance(
+            self._model,
+            self._df_state,
+            audio_tensor,
+            atten_lim_db=self._atten_lim_db,
+        )
+
+    async def filter(self, audio: bytes) -> bytes:
+        if not self._model_ready or not self._filtering:
+            return audio
+
+        # Resample to 48 kHz if needed
+        in_audio = audio
+        if self._sample_rate != 48000 and self._resampler_in:
+            in_audio = await self._resampler_in.resample(
+                audio, self._sample_rate, 48000
+            )
+
+        if not in_audio:
+            return b""
+
+        # int16 bytes → float32 tensor [1, T]
+        audio_np = np.frombuffer(in_audio, dtype=np.int16).astype(np.float32) / 32768.0
+        audio_tensor = torch.from_numpy(audio_np).unsqueeze(0)
+
+        loop = asyncio.get_running_loop()
+        try:
+            enhanced = await loop.run_in_executor(None, self._run_enhance, audio_tensor)
+        except Exception as e:
+            logger.warning(f"DeepFilterNet enhance error: {e}")
+            return audio
+
+        # float32 tensor → int16 bytes
+        out_np = np.clip(enhanced.squeeze().numpy(), -1.0, 1.0)
+        out = (out_np * 32767).astype(np.int16).tobytes()
+
+        # Resample back if needed
+        if self._sample_rate != 48000 and self._resampler_out:
+            return await self._resampler_out.resample(out, 48000, self._sample_rate)
+
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Simple binary audio serializer
 #
 # Client → Server: raw PCM Int16 bytes @ 16 kHz mono
@@ -105,6 +249,13 @@ class RawAudioSerializer(FrameSerializer):
     async def deserialize(self, data: bytes | str) -> Frame | None:
         if isinstance(data, bytes) and len(data) > 0:
             return InputAudioRawFrame(audio=data, sample_rate=16000, num_channels=1)
+        if isinstance(data, str):
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "deepfilter_toggle":
+                    return FilterEnableFrame(enable=bool(msg.get("enable", True)))
+            except Exception:
+                pass
         return None
 
 
@@ -539,6 +690,9 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket client connected")
 
+    # --- noise suppression filter (toggled from UI) ---
+    deep_filter = DeepFilterNetFilter()
+
     # --- transport ---
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -549,6 +703,7 @@ async def websocket_endpoint(websocket: WebSocket):
             audio_out_sample_rate=16000,
             audio_in_channels=1,
             audio_out_channels=1,
+            audio_in_filter=deep_filter,
             serializer=RawAudioSerializer(),
         ),
     )

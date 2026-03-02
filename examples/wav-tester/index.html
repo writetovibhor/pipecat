@@ -19,6 +19,13 @@
       </div>
     </div>
     <div class="header-right">
+      <label class="filter-chip" title="Toggle DeepFilterNet noise suppression on the input audio">
+        <input type="checkbox" id="deepfilter-checkbox" onchange="onDeepFilterChange(this.checked)" />
+        <span class="filter-chip-track">
+          <span class="filter-chip-thumb"></span>
+        </span>
+        <span class="filter-chip-label">DeepFilter</span>
+      </label>
       <div id="ws-status" class="ws-badge ws-disconnected">
         <span class="ws-dot"></span>
         <span id="ws-status-text">Disconnected</span>
@@ -85,6 +92,7 @@
           <div style="display:flex;align-items:center;gap:12px">
             <span id="bot-status" class="bot-status-badge"></span>
             <span id="metrics-turn-badge" class="metrics-turn-badge">Turn 0</span>
+            <button id="snapshot-btn" class="btn btn-ghost btn-sm" onclick="takeSnapshot()" title="Save current metrics as a comparison snapshot">📸 Snapshot</button>
             <button id="copy-metrics-btn" class="btn btn-ghost btn-sm" onclick="copyMetricsJson()" title="Download all metrics as JSON">⬇ Export JSON</button>
           </div>
         </div>
@@ -196,6 +204,27 @@
             </thead>
             <tbody id="turn-tbody"></tbody>
           </table>
+        </div>
+
+        <!-- ── Snapshot comparison panel (hidden until ≥1 snapshot) ── -->
+        <div id="compare-panel" class="compare-panel" style="display:none">
+          <div class="compare-header">
+            <span>Snapshot Comparison</span>
+            <button class="btn btn-ghost btn-sm" onclick="clearSnapshots()">✕ Clear</button>
+          </div>
+          <div class="compare-body">
+            <table class="compare-table">
+              <thead>
+                <tr>
+                  <th class="compare-metric-col">Metric</th>
+                  <th id="cmp-head-a" class="compare-val-col">—</th>
+                  <th id="cmp-head-b" class="compare-val-col">—</th>
+                  <th class="compare-delta-col">Δ (B vs A)</th>
+                </tr>
+              </thead>
+              <tbody id="compare-tbody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 

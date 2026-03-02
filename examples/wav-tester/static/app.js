@@ -40,6 +40,7 @@ let nextPlayTime     = 0;      // next scheduled output audio time
 let monitorNextTime  = 0;      // next scheduled input monitor time
 let selectedFile     = null;   // { name, url }
 let silenceTimer     = null;   // for sending silence burst
+let deepFilterEnabled = false;  // mirrors server-side filter state
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const connectBtn      = () => document.getElementById('connect-btn');
@@ -55,6 +56,9 @@ const wsStatusText    = () => document.getElementById('ws-status-text');
 // ── Metrics data store (for JSON export) ──────────────────────────────────
 let _metricsSnapshot = null;   // latest session-level aggregates from server
 let _turnHistory     = [];     // one entry per turn, augmented with quality on arrival
+
+// ── Snapshot comparison store ───────────────────────────────────────────────
+let _snapshots = [];  // up to 2 entries: { label, filterOn, session, snr, noiseFloor, clipPct }
 
 // ── Audio quality tracking ─────────────────────────────────────────────────
 let speechRmsSum  = 0, speechRmsCount  = 0;  // RMS during VAD-detected speech
@@ -327,6 +331,10 @@ function connectWs() {
     connectBtn().textContent = 'Connect';
     playBtn().disabled = true;
     if (isPlaying) pausePlayback(false);  // pause without sending silence
+    // Reset DeepFilter toggle — new connection always starts with filter off
+    deepFilterEnabled = false;
+    const dfCb = document.getElementById('deepfilter-checkbox');
+    if (dfCb) dfCb.checked = false;
     log(`WebSocket closed (code ${ev.code})`, ev.wasClean ? 'info' : 'warn');
     ws = null;
   };
@@ -341,6 +349,15 @@ function connectWs() {
 function disconnectWs() {
   if (isPlaying) pausePlayback(false);
   if (ws) ws.close();
+}
+
+// ── DeepFilter toggle ───────────────────────────────────────────────────────
+function onDeepFilterChange(checked) {
+  deepFilterEnabled = checked;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'deepfilter_toggle', enable: checked }));
+    log(`DeepFilter noise suppression ${checked ? 'enabled' : 'disabled'}`, checked ? 'ok' : 'info');
+  }
 }
 
 function handleServerMessage(ev) {
@@ -1152,6 +1169,111 @@ function copyMetricsJson() {
   btn.textContent = '✓ Saved!';
   btn.style.color = 'var(--green)';
   setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 2000);
+}
+
+// ── Snapshot comparison ─────────────────────────────────────────────────────
+
+function takeSnapshot() {
+  if (!_metricsSnapshot) { log('No metrics yet — play through at least one turn first.', 'warn'); return; }
+
+  const idx    = _snapshots.length;
+  const label  = idx === 0 ? 'A' : 'B';
+  const filter = deepFilterEnabled;
+
+  // Compute live audio quality from current client-side accumulators
+  const speechRms = speechRmsCount > 0 ? speechRmsSum / speechRmsCount : null;
+  const noiseRms  = noiseRmsCount  > 0 ? noiseRmsSum  / noiseRmsCount  : null;
+  const snrDb     = (speechRms && noiseRms) ? +(20 * Math.log10(speechRms / noiseRms)).toFixed(1) : null;
+  const clipPct   = totalSamplesSent > 0 ? +(clipCount / totalSamplesSent * 100).toFixed(3) : null;
+
+  const scoredTurns = _turnHistory.filter(t => t.quality && t.quality.score > 0);
+  const avgQuality  = scoredTurns.length
+    ? +(scoredTurns.reduce((a, t) => a + t.quality.score, 0) / scoredTurns.length).toFixed(2)
+    : null;
+
+  const snap = {
+    label,
+    filterOn:   filter,
+    session:    { ..._metricsSnapshot, avg_quality: avgQuality },
+    snrDb,
+    noiseFloor: noiseRms != null ? +noiseRms.toFixed(5) : null,
+    clipPct,
+    turnCount:  _metricsSnapshot.turn_count ?? 0,
+    file:       selectedFile ? selectedFile.name : null,
+  };
+
+  if (idx < 2) {
+    _snapshots.push(snap);
+  } else {
+    // Cycle: drop A, promote B → A, new snap → B
+    _snapshots = [_snapshots[1], snap];
+  }
+
+  renderComparison();
+  const btn = document.getElementById('snapshot-btn');
+  const orig = btn.textContent;
+  btn.textContent = `✓ Saved ${label}`;
+  btn.style.color = 'var(--green)';
+  setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+  log(`Snapshot ${label} saved (${filter ? 'DeepFilter ON' : 'No filter'}, ${snap.turnCount} turns)`, 'ok');
+}
+
+function clearSnapshots() {
+  _snapshots = [];
+  document.getElementById('compare-panel').style.display = 'none';
+  log('Snapshots cleared', 'info');
+}
+
+function renderComparison() {
+  const panel = document.getElementById('compare-panel');
+  if (!_snapshots.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  const a = _snapshots[0];
+  const b = _snapshots[1] || null;
+
+  // Update column headers
+  document.getElementById('cmp-head-a').textContent =
+    `${a.label}: ${a.filterOn ? 'DeepFilter ON' : 'No filter'} · ${a.turnCount}t` +
+    (a.file ? ` · ${a.file}` : '');
+  document.getElementById('cmp-head-b').textContent = b
+    ? `${b.label}: ${b.filterOn ? 'DeepFilter ON' : 'No filter'} · ${b.turnCount}t` +
+      (b.file ? ` · ${b.file}` : '')
+    : '— take Snapshot B —';
+
+  const rows = [
+    { label: 'STT Confidence',   va: fmtConf(a.session.avg_stt_confidence),             vb: b ? fmtConf(b.session.avg_stt_confidence)             : null, da: a.session.avg_stt_confidence,             db: b?.session.avg_stt_confidence,             higherBetter: true,  fmt: v => fmtConf(v) },
+    { label: 'STT Latency avg',  va: fmtMs(a.session.stt_mean),                         vb: b ? fmtMs(b.session.stt_mean)                         : null, da: a.session.stt_mean,                       db: b?.session.stt_mean,                       higherBetter: false, fmt: v => fmtMs(v) },
+    { label: 'STT Latency p50',  va: fmtMs(a.session.stt_p50),                          vb: b ? fmtMs(b.session.stt_p50)                          : null, da: a.session.stt_p50,                        db: b?.session.stt_p50,                        higherBetter: false, fmt: v => fmtMs(v) },
+    { label: 'Round-Trip avg',   va: fmtMs(a.session.rtt_mean),                         vb: b ? fmtMs(b.session.rtt_mean)                         : null, da: a.session.rtt_mean,                       db: b?.session.rtt_mean,                       higherBetter: false, fmt: v => fmtMs(v) },
+    { label: 'Round-Trip p50',   va: fmtMs(a.session.rtt_p50),                          vb: b ? fmtMs(b.session.rtt_p50)                          : null, da: a.session.rtt_p50,                        db: b?.session.rtt_p50,                        higherBetter: false, fmt: v => fmtMs(v) },
+    { label: 'LLM Latency avg',  va: fmtMs(a.session.llm_mean),                         vb: b ? fmtMs(b.session.llm_mean)                         : null, da: a.session.llm_mean,                       db: b?.session.llm_mean,                       higherBetter: false, fmt: v => fmtMs(v) },
+    { label: 'Input SNR',        va: a.snrDb    != null ? a.snrDb + ' dB'      : '—',  vb: b ? (b.snrDb    != null ? b.snrDb + ' dB'      : '—') : null, da: a.snrDb,                                  db: b?.snrDb,                                  higherBetter: true,  fmt: v => v.toFixed(1) + ' dB' },
+    { label: 'Noise Floor',      va: a.noiseFloor != null ? a.noiseFloor.toFixed(4) : '—', vb: b ? (b.noiseFloor != null ? b.noiseFloor.toFixed(4) : '—') : null, da: a.noiseFloor,                      db: b?.noiseFloor,                             higherBetter: false, fmt: v => v.toFixed(4) },
+    { label: 'Clipping Rate',    va: a.clipPct  != null ? a.clipPct + '%'      : '—',  vb: b ? (b.clipPct  != null ? b.clipPct + '%'      : '—') : null, da: a.clipPct,                                db: b?.clipPct,                                higherBetter: false, fmt: v => v.toFixed(3) + '%' },
+    { label: 'LLM Quality',      va: a.session.avg_quality != null ? a.session.avg_quality.toFixed(2) + ' ★' : '—', vb: b ? (b.session.avg_quality != null ? b.session.avg_quality.toFixed(2) + ' ★' : '—') : null, da: a.session.avg_quality, db: b?.session.avg_quality, higherBetter: true, fmt: v => v.toFixed(2) + ' ★' },
+  ];
+
+  const tbody = document.getElementById('compare-tbody');
+  tbody.innerHTML = rows.map(r => {
+    let deltaCell = '<td class="cmp-delta">—</td>';
+    if (b && r.da != null && r.db != null) {
+      const raw   = r.db - r.da;
+      const good  = r.higherBetter ? raw > 0 : raw < 0;
+      const bad   = r.higherBetter ? raw < 0 : raw > 0;
+      const cls   = good ? 'cmp-good' : (bad ? 'cmp-bad' : '');
+      const sign  = raw > 0 ? '+' : '';
+      deltaCell   = `<td class="cmp-delta ${cls}">${sign}${r.fmt(raw)}</td>`;
+    } else if (!b) {
+      deltaCell = '<td class="cmp-delta cmp-muted">await B</td>';
+    }
+    return `<tr>
+      <td class="cmp-label">${r.label}</td>
+      <td class="cmp-val">${r.va ?? '—'}</td>
+      <td class="cmp-val">${r.vb ?? '—'}</td>
+      ${deltaCell}
+    </tr>`;
+  }).join('');
 }
 
 // ── Keyboard shortcut ──────────────────────────────────────────────────────
