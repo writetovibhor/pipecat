@@ -2,6 +2,8 @@
 
 A browser-based tool for testing Pipecat voice pipelines using pre-recorded WAV files instead of a live microphone. Simulates a two-way voice conversation by letting you play/pause audio at natural turn boundaries.
 
+![Pipecat WAV Tester screenshot](screenshot.png)
+
 ## What it does
 
 - Lists all WAV files from a local `input/` directory in a sidebar
