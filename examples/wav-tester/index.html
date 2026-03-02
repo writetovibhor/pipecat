@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pipecat WAV Tester</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">🎙</span>
+        <span class="logo-text">Pipecat WAV Tester</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="ws-status" class="ws-badge ws-disconnected">
+        <span class="ws-dot"></span>
+        <span id="ws-status-text">Disconnected</span>
+      </div>
+      <button id="connect-btn" class="btn btn-primary" onclick="toggleConnect()">Connect</button>
+    </div>
+  </header>
+
+  <!-- ── Main layout ── -->
+  <div class="main">
+
+    <!-- ── Left: file list ── -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2>Input Files</h2>
+        <button class="btn btn-ghost btn-sm" onclick="loadFileList()" title="Refresh">↺</button>
+      </div>
+      <div id="file-list" class="file-list">
+        <p class="hint">Click <strong>Connect</strong> then select a file.</p>
+      </div>
+    </aside>
+
+    <!-- ── Right: player + visualizers + log ── -->
+    <section class="player">
+
+      <!-- Selected file / progress + play button in one row -->
+      <div class="now-playing">
+        <button id="play-btn" class="play-btn" disabled onclick="togglePlay()">
+          <span id="play-icon" class="play-icon">▶</span>
+        </button>
+        <div class="now-playing-body">
+          <div class="now-playing-info">
+            <span id="file-name" class="file-name-label">No file selected</span>
+            <span id="time-display" class="time-display">0:00 / 0:00</span>
+          </div>
+          <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Visualizers ── -->
+      <div class="visualizers-row">
+        <div class="viz-card">
+          <div class="viz-label">
+            <span class="viz-dot viz-dot-input"></span>
+            Input — sending to Pipecat
+          </div>
+          <canvas id="input-viz" class="viz-canvas"></canvas>
+        </div>
+        <div class="viz-card">
+          <div class="viz-label">
+            <span class="viz-dot viz-dot-output"></span>
+            Output — Pipecat TTS response
+          </div>
+          <canvas id="output-viz" class="viz-canvas"></canvas>
+        </div>
+      </div>
+
+      <!-- ── Metrics dashboard ── -->
+      <div class="metrics-section">
+        <div class="metrics-header">
+          <span>Live Metrics</span>
+          <div style="display:flex;align-items:center;gap:12px">
+            <span id="bot-status" class="bot-status-badge"></span>
+            <span id="metrics-turn-badge" class="metrics-turn-badge">Turn 0</span>
+            <button id="copy-metrics-btn" class="btn btn-ghost btn-sm" onclick="copyMetricsJson()" title="Download all metrics as JSON">⬇ Export JSON</button>
+          </div>
+        </div>
+
+        <!-- Row 1: pipeline latency -->
+        <div class="kpi-row">
+          <div class="kpi-card" id="kpi-rtt">
+            <button class="kpi-info-btn" data-metric="rtt" aria-label="About Round-Trip">ⓘ</button>
+            <div class="kpi-label">Round-Trip <span class="kpi-agg-lbl">avg</span></div>
+            <div class="kpi-value" id="kv-rtt">—</div>
+            <div class="kpi-stats"><span class="kpi-stat-lbl">p50</span><span id="kp50-rtt">—</span><span class="kpi-sep">·</span><span class="kpi-stat-lbl">p99</span><span id="kp99-rtt">—</span></div>
+            <div class="kpi-sub">user stop → bot start</div>
+          </div>
+          <div class="kpi-card" id="kpi-stt">
+            <button class="kpi-info-btn" data-metric="stt" aria-label="About STT Latency">ⓘ</button>
+            <div class="kpi-label">STT Latency <span class="kpi-agg-lbl">avg</span></div>
+            <div class="kpi-value" id="kv-stt">—</div>
+            <div class="kpi-stats"><span class="kpi-stat-lbl">p50</span><span id="kp50-stt">—</span><span class="kpi-sep">·</span><span class="kpi-stat-lbl">p99</span><span id="kp99-stt">—</span></div>
+            <div class="kpi-sub">speech → transcript</div>
+          </div>
+          <div class="kpi-card" id="kpi-llm">
+            <button class="kpi-info-btn" data-metric="llm" aria-label="About LLM Latency">ⓘ</button>
+            <div class="kpi-label">LLM Latency <span class="kpi-agg-lbl">avg</span></div>
+            <div class="kpi-value" id="kv-llm">—</div>
+            <div class="kpi-stats"><span class="kpi-stat-lbl">p50</span><span id="kp50-llm">—</span><span class="kpi-sep">·</span><span class="kpi-stat-lbl">p99</span><span id="kp99-llm">—</span></div>
+            <div class="kpi-sub">transcript → first token</div>
+          </div>
+          <div class="kpi-card" id="kpi-tts">
+            <button class="kpi-info-btn" data-metric="tts" aria-label="About TTS TTFB">ⓘ</button>
+            <div class="kpi-label">TTS TTFB <span class="kpi-agg-lbl">avg</span></div>
+            <div class="kpi-value" id="kv-tts">—</div>
+            <div class="kpi-stats"><span class="kpi-stat-lbl">p50</span><span id="kp50-tts">—</span><span class="kpi-sep">·</span><span class="kpi-stat-lbl">p99</span><span id="kp99-tts">—</span></div>
+            <div class="kpi-sub">llm done → audio start</div>
+          </div>
+        </div>
+
+        <!-- Row 2: audio quality + conversation health -->
+        <div class="kpi-row">
+          <div class="kpi-card" id="kpi-snr">
+            <button class="kpi-info-btn" data-metric="snr" aria-label="About Input SNR">ⓘ</button>
+            <div class="kpi-label">Input SNR</div>
+            <div class="kpi-value" id="kv-snr">—</div>
+            <div class="kpi-sub">signal / noise (dB)</div>
+          </div>
+          <div class="kpi-card" id="kpi-noise">
+            <button class="kpi-info-btn" data-metric="noise" aria-label="About Noise Floor">ⓘ</button>
+            <div class="kpi-label">Noise Floor</div>
+            <div class="kpi-value" id="kv-noise">—</div>
+            <div class="kpi-sub">avg RMS during silence</div>
+          </div>
+          <div class="kpi-card" id="kpi-interrupts">
+            <button class="kpi-info-btn" data-metric="interrupts" aria-label="About Interruptions">ⓘ</button>
+            <div class="kpi-label">Interruptions</div>
+            <div class="kpi-value" id="kv-interrupts">0</div>
+            <div class="kpi-sub">user spoke over bot</div>
+          </div>
+          <div class="kpi-card" id="kpi-quality">
+            <button class="kpi-info-btn" data-metric="quality" aria-label="About Avg Quality">ⓘ</button>
+            <div class="kpi-label">Avg Quality</div>
+            <div class="kpi-value" id="kv-quality">—</div>
+            <div class="kpi-sub">LLM judge (1–5)</div>
+          </div>
+        </div>
+
+        <!-- Row 3: speech + content health -->
+        <div class="kpi-row">
+          <div class="kpi-card" id="kpi-stt-conf">
+            <button class="kpi-info-btn" data-metric="stt-conf" aria-label="About STT Confidence">ⓘ</button>
+            <div class="kpi-label">STT Confidence</div>
+            <div class="kpi-value" id="kv-stt-conf">—</div>
+            <div class="kpi-sub">avg word confidence</div>
+          </div>
+          <div class="kpi-card" id="kpi-wpm">
+            <button class="kpi-info-btn" data-metric="wpm" aria-label="About Speaking Rate">ⓘ</button>
+            <div class="kpi-label">Speaking Rate</div>
+            <div class="kpi-value" id="kv-wpm">—</div>
+            <div class="kpi-sub">words per minute</div>
+          </div>
+          <div class="kpi-card" id="kpi-clip">
+            <button class="kpi-info-btn" data-metric="clip" aria-label="About Clipping Rate">ⓘ</button>
+            <div class="kpi-label">Clipping Rate</div>
+            <div class="kpi-value" id="kv-clip">—</div>
+            <div class="kpi-sub">saturated samples</div>
+          </div>
+          <div class="kpi-card" id="kpi-response-len">
+            <button class="kpi-info-btn" data-metric="response-len" aria-label="About Avg Response Length">ⓘ</button>
+            <div class="kpi-label">Avg Response</div>
+            <div class="kpi-value" id="kv-response-len">—</div>
+            <div class="kpi-sub">bot words / turn</div>
+          </div>
+        </div>
+
+        <!-- Per-turn table -->
+        <div class="turn-log">
+          <table class="turn-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>User said</th>
+                <th>RTT</th>
+                <th>STT</th>
+                <th>LLM</th>
+                <th>TTS</th>
+                <th>Conf</th>
+                <th>WPM</th>
+                <th>Words</th>
+                <th>Quality</th>
+              </tr>
+            </thead>
+            <tbody id="turn-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Log ── -->
+      <div class="log-section">
+        <div class="log-header">
+          <span>Log</span>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="downloadLog()" id="download-log-btn" title="Download log as text file">⬇ Export</button>
+            <button class="btn btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+          </div>
+        </div>
+        <div id="log" class="log"></div>
+      </div>
+
+    </section>
+  </div><!-- .main -->
+</div><!-- .app -->
+
+<!-- Metric info tooltip (shared, repositioned on each open) -->
+<div id="metric-tooltip" class="metric-tooltip" role="tooltip" aria-hidden="true"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
