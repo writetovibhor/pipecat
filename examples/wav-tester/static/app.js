@@ -8,7 +8,8 @@
  *  3. User clicks Connect → open WebSocket to /ws
  *  4. User presses Space / clicks Play:
  *       • Playing  → read 10 ms chunks from the audio buffer, convert to
- *                    Int16, send over WebSocket; animate input visualizer
+ *                    Int16, send over WebSocket at real-time rate (clock-
+ *                    compensated setTimeout, not setInterval); animate viz
  *       • Pausing  → stop chunk loop; send ~600 ms of silence so pipecat's
  *                    VAD detects end-of-speech and triggers STT → LLM → TTS
  *  5. Receive binary frame from server → raw PCM Int16 bytes → schedule
@@ -32,7 +33,9 @@ let monitorCtx       = null;   // native-rate AudioContext for input monitoring
 let pcmBuffer        = null;   // Float32Array — full file @ 16 kHz mono
 let playhead         = 0;      // current position in samples
 let isPlaying        = false;
-let chunkTimer       = null;   // setInterval handle
+let chunkTimer       = null;   // setTimeout handle
+let playStartTime    = null;   // performance.now() when playback started
+let samplesSent      = 0;      // samples sent since playback started (for clock compensation)
 let nextPlayTime     = 0;      // next scheduled output audio time
 let monitorNextTime  = 0;      // next scheduled input monitor time
 let selectedFile     = null;   // { name, url }
@@ -639,13 +642,29 @@ function startPlayback() {
   // Cancel any pending silence burst
   if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
 
-  chunkTimer = setInterval(sendChunk, CHUNK_MS);
+  playStartTime = performance.now();
+  samplesSent   = 0;
+  scheduleNextChunk();
+}
+
+function scheduleNextChunk() {
+  if (!isPlaying) return;
+  // Compute when the next chunk should be sent based on the wall clock,
+  // so drift in the JS event loop doesn't cause audio to outrun real-time.
+  const nextSendMs = playStartTime + (samplesSent + CHUNK_SAMPLES) * 1000 / SAMPLE_RATE;
+  const delayMs    = Math.max(0, nextSendMs - performance.now());
+  chunkTimer = setTimeout(() => {
+    sendChunk();
+    scheduleNextChunk();
+  }, delayMs);
 }
 
 function pausePlayback(sendSilence = true) {
   isPlaying = false;
-  clearInterval(chunkTimer);
-  chunkTimer = null;
+  clearTimeout(chunkTimer);
+  chunkTimer    = null;
+  playStartTime = null;
+  samplesSent   = 0;
   playBtn().classList.remove('playing');
   playIcon().textContent = '▶';
 
@@ -679,7 +698,9 @@ function sendChunk() {
   scheduleInputAudio(chunk);
   inputViz.feed(int16);
   updateAudioQuality(int16);
-  playhead += CHUNK_SAMPLES;
+  const sent = end - playhead;
+  playhead    += sent;
+  samplesSent += sent;
   updateProgress();
 }
 

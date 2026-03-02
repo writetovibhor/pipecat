@@ -140,13 +140,16 @@ class TurnData:
     stt_confidence: Optional[float] = None    # avg word confidence 0–1
     speaking_rate_wpm: Optional[float] = None # words per minute (from Deepgram word timestamps)
     bot_word_count: int = 0                   # word count of bot response
+    stt_latency_ms: Optional[float] = None    # wall-clock time from last spoken sample to transcript
 
     def _diff(self, a: Optional[float], b: Optional[float]) -> Optional[float]:
         return round((b - a) * 1000, 1) if a is not None and b is not None else None
 
     @property
     def stt_ms(self) -> Optional[float]:
-        return self._diff(self.t_user_stopped, self.t_transcription)
+        # Pre-computed in MetricsTracker: t_transcript_received − (t_stream_start + words[-1].end)
+        # Always positive: measures Deepgram processing delay after last spoken audio sample.
+        return self.stt_latency_ms
 
     @property
     def llm_ms(self) -> Optional[float]:
@@ -185,6 +188,7 @@ class SessionMetrics:
         self.total_interruptions: int = 0
         self.bot_speaking: bool = False
         self._next_id: int = 1
+        self.t_stream_start: Optional[float] = None  # wall-clock time of first audio frame to STT
 
     def start_turn(self) -> TurnData:
         self.current = TurnData(turn_id=self._next_id)
@@ -307,6 +311,28 @@ class QualityJudge:
 # ---------------------------------------------------------------------------
 
 
+class AudioStreamTracker(FrameProcessor):
+    """Records the wall-clock time of the first audio frame sent to STT.
+
+    Must be placed immediately before the STT service in the pipeline so that
+    t_stream_start aligns with the origin of Deepgram's word timestamps.
+    """
+
+    def __init__(self, session: SessionMetrics):
+        super().__init__()
+        self._session = session
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and isinstance(frame, InputAudioRawFrame)
+            and self._session.t_stream_start is None
+        ):
+            self._session.t_stream_start = time.monotonic()
+
+
 class BotTextNotifier(FrameProcessor):
     """Accumulates LLM TextFrames; records LLM timing into the shared TurnData."""
 
@@ -379,11 +405,21 @@ class MetricsTracker(FrameProcessor):
                 if not self._s.current.t_transcription:
                     self._s.current.t_transcription = now
                     self._s.current.user_text = frame.text
-                    # Extract STT confidence and speaking rate from Deepgram word-level data
+                    # Extract STT latency, confidence and speaking rate from Deepgram word-level data
                     if frame.result is not None:
                         try:
                             alt = frame.result.channel.alternatives[0]
                             words = alt.words or []
+                            # STT latency: wall-clock delay from last spoken audio sample to transcript.
+                            # words[-1].end is Deepgram's stream-relative timestamp (seconds) of
+                            # the last word's audio end.  t_stream_start is the wall-clock time of
+                            # the first audio byte sent to Deepgram, so their sum is the wall-clock
+                            # time of the last spoken sample — giving pure Deepgram processing delay.
+                            if words and self._s.t_stream_start is not None:
+                                t_last_sample = self._s.t_stream_start + words[-1].end
+                                self._s.current.stt_latency_ms = round(
+                                    (now - t_last_sample) * 1000, 1
+                                )
                             # Average per-word confidence; fall back to alternative-level confidence
                             word_confs = [w.confidence for w in words if w.confidence > 0]
                             if word_confs:
@@ -584,6 +620,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     session = SessionMetrics()
     judge = QualityJudge(api_key=os.getenv("GEMINI_API_KEY", ""))
+    audio_stream_tracker = AudioStreamTracker(session=session)
     metrics_tracker = MetricsTracker(session=session, judge=judge)
     bot_text_notifier = BotTextNotifier(session=session)
 
@@ -591,6 +628,7 @@ async def websocket_endpoint(websocket: WebSocket):
     pipeline = Pipeline(
         [
             transport.input(),
+            audio_stream_tracker,  # records t_stream_start for STT latency baseline
             stt,
             metrics_tracker,    # status notifications + latency tracking
             user_aggregator,
