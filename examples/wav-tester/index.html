@@ -19,13 +19,48 @@
       </div>
     </div>
     <div class="header-right">
-      <label class="filter-chip" title="Toggle DeepFilterNet noise suppression on the input audio">
-        <input type="checkbox" id="deepfilter-checkbox" onchange="onDeepFilterChange(this.checked)" />
-        <span class="filter-chip-track">
-          <span class="filter-chip-thumb"></span>
-        </span>
-        <span class="filter-chip-label">DeepFilter</span>
+
+      <!-- Record original input toggle -->
+      <label class="rec-orig-toggle" title="Record the raw input audio before the filter (File 1). Disabled by default.">
+        <input type="checkbox" id="record-original-cb" />
+        <span class="rec-orig-track"><span class="rec-orig-thumb"></span></span>
+        <span class="rec-orig-lbl">Rec. Original</span>
       </label>
+
+      <!-- Filter selector dropdown -->
+      <div class="filter-select-wrap">
+        <label class="filter-select-lbl" for="filter-select">Filter</label>
+        <select id="filter-select" class="filter-select-dropdown" onchange="onFilterSelectChange(this.value)">
+          <option value="none">None</option>
+          <option value="deepfilter">DeepFilterNet</option>
+          <option value="quail">Quail</option>
+        </select>
+      </div>
+
+      <!-- DeepFilterNet config panel -->
+      <div id="deepfilter-config" class="filter-config-panel" style="display:none">
+        <label class="atten-label" title="Attenuation limit in dB (lower = less aggressive; blank = unlimited)">
+          <span class="atten-lbl-text">Atten</span>
+          <input type="range" id="atten-slider" min="0" max="40" step="1" value="20"
+                 oninput="onAttenLimChange(this.value)" />
+          <span id="atten-value" class="atten-value">20 dB</span>
+          <button class="btn btn-ghost btn-sm" onclick="onAttenLimChange(null)" title="Remove limit (full suppression)">∞</button>
+        </label>
+      </div>
+
+      <!-- Quail config panel -->
+      <div id="quail-config" class="filter-config-panel" style="display:none">
+        <select id="quail-model-select" class="filter-model-select"
+                title="Quail model variant"
+                onchange="onQuailModelChange()">
+          <option value="quail-vf-l-16khz">Voice Focus L · 16 kHz</option>
+          <option value="quail-l-16khz">L · 16 kHz</option>
+          <option value="quail-s-16khz">S · 16 kHz</option>
+          <option value="quail-l-8khz">L · 8 kHz</option>
+          <option value="quail-s-8khz">S · 8 kHz</option>
+        </select>
+      </div>
+
       <div id="ws-status" class="ws-badge ws-disconnected">
         <span class="ws-dot"></span>
         <span id="ws-status-text">Disconnected</span>
@@ -33,6 +68,23 @@
       <button id="connect-btn" class="btn btn-primary" onclick="toggleConnect()">Connect</button>
     </div>
   </header>
+
+  <!-- ── Filter status bar ── -->
+  <div id="filter-status-bar" class="filter-status-bar" style="display:none">
+    <span class="fstatus-label">Filters</span>
+    <div id="fstatus-deepfilter" class="fstatus-pill" data-state="pending">
+      <span class="fstatus-dot"></span>
+      <span class="fstatus-name">DeepFilterNet</span>
+      <span class="fstatus-sep">·</span>
+      <span class="fstatus-text" id="fstatus-text-deepfilter">—</span>
+    </div>
+    <div id="fstatus-quail" class="fstatus-pill" data-state="pending">
+      <span class="fstatus-dot"></span>
+      <span class="fstatus-name">Quail</span>
+      <span class="fstatus-sep">·</span>
+      <span class="fstatus-text" id="fstatus-text-quail">—</span>
+    </div>
+  </div>
 
   <!-- ── Main layout ── -->
   <div class="main">
@@ -182,6 +234,27 @@
             <div class="kpi-label">Avg Response</div>
             <div class="kpi-value" id="kv-response-len">—</div>
             <div class="kpi-sub">bot words / turn</div>
+          </div>
+        </div>
+
+        <!-- Row 4: Active filter stats (hidden until filter data arrives) -->
+        <div class="kpi-row" id="filter-stats-row" style="display:none">
+          <div class="kpi-card" id="kpi-filter-latency">
+            <button class="kpi-info-btn" data-metric="filter-latency" aria-label="About Filter Latency">ⓘ</button>
+            <div class="kpi-label">Filter Latency</div>
+            <div class="kpi-value" id="kv-filter-latency">—</div>
+            <div class="kpi-sub">avg ms per audio chunk</div>
+          </div>
+          <div class="kpi-card" id="kpi-filter-noise-db">
+            <button class="kpi-info-btn" data-metric="filter-noise-db" aria-label="About Noise Reduction">ⓘ</button>
+            <div class="kpi-label">Noise Reduction</div>
+            <div class="kpi-value" id="kv-filter-noise-db">—</div>
+            <div class="kpi-sub">avg dB suppressed (DeepFilter only)</div>
+          </div>
+          <div class="kpi-card" id="kpi-filter-active">
+            <div class="kpi-label">Active Filter</div>
+            <div class="kpi-value" id="kv-filter-active" style="font-size:14px">—</div>
+            <div class="kpi-sub" id="kv-filter-model"></div>
           </div>
         </div>
 

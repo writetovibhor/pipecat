@@ -7,6 +7,7 @@
 """Piper TTS service implementation."""
 
 import asyncio
+import re
 from pathlib import Path
 from typing import AsyncGenerator, AsyncIterator, Optional
 
@@ -197,6 +198,16 @@ class PiperHttpTTSService(TTSService):
             Frame: Audio frames containing the synthesized speech and status frames.
         """
         logger.debug(f"{self}: Generating TTS [{text}]")
+
+        # Piper fails with "# channels not specified" when synthesis produces
+        # zero audio chunks (e.g. text consisting only of periods like "...").
+        # Skip texts that contain no letters or digits.
+        if not re.search(r"[a-zA-Z0-9]", text):
+            logger.debug(f"{self}: Skipping non-speakable text [{text}]")
+            yield TTSStartedFrame(context_id=context_id)
+            yield TTSStoppedFrame(context_id=context_id)
+            return
+
         headers = {
             "Content-Type": "application/json",
         }
@@ -209,26 +220,26 @@ class PiperHttpTTSService(TTSService):
             }
 
             async with self._session.post(self._base_url, json=data, headers=headers) as response:
-                if response.status != 200:
-                    error = await response.text()
-                    yield ErrorFrame(
-                        error=f"Error getting audio (status: {response.status}, error: {error})"
-                    )
-                    return
+                    if response.status != 200:
+                        error = await response.text()
+                        yield ErrorFrame(
+                            error=f"Error getting audio (status: {response.status}, error: {error})"
+                        )
+                        return
 
-                await self.start_tts_usage_metrics(text)
+                    await self.start_tts_usage_metrics(text)
 
-                yield TTSStartedFrame(context_id=context_id)
+                    yield TTSStartedFrame(context_id=context_id)
 
-                CHUNK_SIZE = self.chunk_size
+                    CHUNK_SIZE = self.chunk_size
 
-                async for frame in self._stream_audio_frames_from_iterator(
-                    response.content.iter_chunked(CHUNK_SIZE),
-                    strip_wav_header=True,
-                    context_id=context_id,
-                ):
-                    await self.stop_ttfb_metrics()
-                    yield frame
+                    async for frame in self._stream_audio_frames_from_iterator(
+                        response.content.iter_chunked(CHUNK_SIZE),
+                        strip_wav_header=True,
+                        context_id=context_id,
+                    ):
+                        await self.stop_ttfb_metrics()
+                        yield frame
         except Exception as e:
             yield ErrorFrame(error=f"Unknown error occurred: {e}")
         finally:

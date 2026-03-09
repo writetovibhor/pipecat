@@ -19,26 +19,55 @@ The bot persona is a WestJet customer care agent (Maya) that dynamically mocks r
 
 ## Setup
 
+This app runs entirely locally — no cloud API keys required. It uses:
+
+- **STT**: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (local, CPU/GPU)
+- **LLM**: [Ollama](https://ollama.com) (local inference server)
+- **TTS**: [Piper](https://github.com/OHF-Voice/piper1-gpl) HTTP server (local)
+
 ### Prerequisites
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
-- API keys for Deepgram, Google Gemini, and Cartesia
+- [Ollama](https://ollama.com) installed and running
 
-### 1. Create virtual environment
+### 1. Install Ollama and pull a model
+
+Download and install Ollama from https://ollama.com, then pull a model:
+
+```bash
+ollama pull llama3.1:8b
+```
+
+The server starts automatically on `http://localhost:11434`. You can use any
+chat-capable model — set `OLLAMA_MODEL` in `.env` to override the default
+(`llama3.1:8b`).
+
+### 2. Install and start the Piper TTS server
+
+```bash
+uv pip install "piper-tts[http]"
+# Start the server with the default voice used by the bot
+python -m piper.http_server -m en_US-hfc_female-medium --port 5000
+```
+
+Piper downloads the voice model on first run (~50 MB). Leave this server
+running in a separate terminal. The bot connects to it at
+`http://localhost:5000` by default (override with `PIPER_BASE_URL`).
+
+Other voices from https://rhasspy.github.io/piper-samples/ can be used;
+set the `-m` flag and update `PIPER_BASE_URL` or pass a different `voice_id`
+in `bot.py`.
+
+### 3. Create virtual environment and install dependencies
 
 ```bash
 cd examples/wav-tester
 uv venv --python 3.11
 source .venv/bin/activate
-```
 
-### 2. Install dependencies
-
-```bash
-uv pip install -e "../../[websocket,deepgram,cartesia,silero]"
-uv pip install fastapi "uvicorn[standard]" python-dotenv aiofiles \
-               google-genai google-cloud-speech google-cloud-texttospeech numpy
+uv pip install -e "../../[websocket,whisper,silero,ollama]"
+uv pip install fastapi "uvicorn[standard]" python-dotenv aiofiles aiohttp numpy
 ```
 
 **Optional — DeepFilterNet noise suppression:**
@@ -47,27 +76,33 @@ uv pip install fastapi "uvicorn[standard]" python-dotenv aiofiles \
 uv pip install deepfilternet
 ```
 
-If `deepfilternet` is not installed the toggle in the UI is still visible but has no effect (audio passes through unmodified).
+If `deepfilternet` is not installed the DeepFilter option in the UI is still
+visible but has no effect (audio passes through unmodified).
 
-### 3. Configure API keys
+### 4. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in your keys
+# Edit .env as needed (all settings are optional — defaults work out of the box)
 ```
 
 `.env` format:
 
 ```
-DEEPGRAM_API_KEY=your_deepgram_key
-GEMINI_API_KEY=your_gemini_key
-CARTESIA_API_KEY=your_cartesia_key
+# Piper TTS HTTP server URL (default: http://localhost:5000)
+# PIPER_BASE_URL=http://localhost:5000
+
+# Ollama server URL (default: http://localhost:11434)
+# OLLAMA_BASE_URL=http://localhost:11434
+
+# Ollama model to use (default: llama3.1:8b)
+# OLLAMA_MODEL=llama3.1:8b
 
 # Optional: path to WAV files directory (default: input/)
 # INPUT_DIR=input
 ```
 
-### 4. Add WAV files
+### 5. Add WAV files
 
 Put `.wav` files (any sample rate, mono or stereo) in the `input/` directory. Subdirectories are supported and shown as groups in the sidebar. Symlinks are followed.
 
@@ -79,7 +114,9 @@ input/
   other_samples.wav
 ```
 
-### 5. Run
+### 6. Run
+
+Make sure Ollama and the Piper HTTP server are running (steps 1–2), then:
 
 ```bash
 source .venv/bin/activate
@@ -87,6 +124,10 @@ uvicorn bot:app --host 0.0.0.0 --port 7860 --reload
 ```
 
 Open **http://localhost:7860** in your browser.
+
+> **First run note:** faster-whisper downloads the `distil-medium.en` model
+> (~600 MB) on first use and caches it in `~/.cache/huggingface/hub/`. This
+> is a one-time download.
 
 ## Usage
 
@@ -107,27 +148,33 @@ WAV file → 16 kHz Float32           FastAPIWebsocketTransport
   (also played locally               InputAudioRawFrame
    via monitorCtx)                     │
                                        ▼
-                              [DeepFilterNetFilter]  ← optional noise suppression
-                              (toggled by UI checkbox)
+                                     FilterRouter  ← routes filter control msgs
                                        │
                                        ▼
-                                     DeepgramSTTService  (STT)
+                              [FilterMux]  ← optional noise suppression
+                              (DeepFilterNet or Quail, selected from UI)
+                                       │
+                                       ▼
+                                     WhisperSTTService  (local faster-whisper)
                                        │ TranscriptionFrame
                                        ▼
-                                     StatusNotifier  ──► transcription event
+                                     MetricsTracker  ──► transcription event
                                        │                 user_speaking event
                                        ▼
                                      LLMUserAggregator
                                        │ LLMMessagesFrame (on turn end)
                                        ▼
-                                     GoogleLLMService  (Gemini 2.5 Flash)
+                                     OLLamaLLMService  (local Ollama)
                                        │ TextFrame stream
                                        ▼
                                      BotTextNotifier  ──► bot_text event
                                        │ (full response text)
                                        ▼
-                                     CartesiaTTSService  (TTS)
+                                     PiperHttpTTSService  (local Piper server)
                                        │ OutputAudioRawFrame
+                                       ▼
+                                     RecordingProcessor  ← captures bot audio
+                                       │
                                        ▼
                                      FastAPIWebsocketOutputTransport
   ◄──────────  raw Int16 PCM bytes     RawAudioSerializer.serialize()
@@ -135,7 +182,8 @@ WAV file → 16 kHz Float32           FastAPIWebsocketTransport
 
   ◄──────────  JSON text events      OutputTransportMessageFrame
   (transcription, bot_text,
-   bot_speaking, user_speaking)
+   bot_speaking, user_speaking,
+   metrics_update, filter_status)
 ```
 
 ### Key design decisions

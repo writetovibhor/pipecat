@@ -87,50 +87,118 @@ html, body {
   50%       { opacity: 0.2; }
 }
 
-/* ── DeepFilter toggle chip ── */
-.filter-chip {
+/* ── Record original toggle ── */
+.rec-orig-toggle {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   cursor: pointer;
   user-select: none;
 }
-.filter-chip input { display: none; }
+.rec-orig-toggle input { display: none; }
 
-.filter-chip-track {
+.rec-orig-track {
   position: relative;
-  width: 34px;
-  height: 18px;
-  border-radius: 9px;
+  width: 28px;
+  height: 15px;
+  border-radius: 8px;
   background: var(--surface2);
   border: 1px solid var(--border);
+  flex-shrink: 0;
   transition: background 0.2s, border-color 0.2s;
 }
-.filter-chip-thumb {
+.rec-orig-thumb {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 12px;
-  height: 12px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--text-muted);
   transition: transform 0.2s, background 0.2s;
 }
-.filter-chip input:checked ~ .filter-chip-track {
-  background: var(--green-dim);
-  border-color: var(--green);
+.rec-orig-toggle input:checked ~ .rec-orig-track {
+  background: rgba(255, 90, 90, 0.2);
+  border-color: var(--red);
 }
-.filter-chip input:checked ~ .filter-chip-track .filter-chip-thumb {
-  transform: translateX(16px);
-  background: var(--green);
+.rec-orig-toggle input:checked ~ .rec-orig-track .rec-orig-thumb {
+  transform: translateX(13px);
+  background: var(--red);
 }
-.filter-chip-label {
-  font-size: 12px;
+.rec-orig-lbl {
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-muted);
   transition: color 0.2s;
+  white-space: nowrap;
 }
-.filter-chip input:checked ~ .filter-chip-label { color: var(--green); }
+.rec-orig-toggle input:checked ~ .rec-orig-lbl { color: var(--red); }
+
+/* ── Filter selector ── */
+.filter-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.filter-select-lbl {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.filter-select-dropdown {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 6px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.filter-select-dropdown:focus { border-color: var(--accent); }
+
+/* ── Per-filter config panels ── */
+.filter-config-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  animation: panel-in 0.15s ease;
+}
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Attenuation limit control (inside DeepFilterNet panel) ── */
+.atten-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.atten-lbl-text { font-weight: 500; }
+.atten-value { min-width: 40px; text-align: right; color: var(--text); font-size: 11px; }
+#atten-slider { width: 70px; accent-color: var(--accent); cursor: pointer; }
+
+
+.filter-model-select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 6px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.filter-model-select:focus { border-color: var(--accent); }
 
 /* ── Buttons ── */
 .btn {
@@ -148,6 +216,90 @@ html, body {
 .btn-ghost    { background: transparent; color: var(--text-muted); }
 .btn-ghost:hover { background: var(--surface2); color: var(--text); }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+/* ── Filter status bar ── */
+.filter-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.fstatus-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+.fstatus-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 7px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.fstatus-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.fstatus-name { font-weight: 500; color: var(--text); }
+.fstatus-sep  { color: var(--border); }
+.fstatus-text { color: var(--text-muted); font-size: 11px; }
+
+/* pending: grey, no dot color */
+.fstatus-pill[data-state="pending"] .fstatus-dot { background: var(--border); }
+
+/* loading: amber pulse */
+.fstatus-pill[data-state="loading"] .fstatus-dot {
+  background: #f0a000;
+  animation: pulse-amber 0.8s ease-in-out infinite;
+}
+.fstatus-pill[data-state="loading"] .fstatus-text { color: #f0a000; }
+
+/* ready / inactive: dim green */
+.fstatus-pill[data-state="ready"] .fstatus-dot,
+.fstatus-pill[data-state="inactive"] .fstatus-dot { background: var(--green); opacity: 0.55; }
+
+/* active: bright green, highlighted pill */
+.fstatus-pill[data-state="active"] {
+  border-color: var(--green);
+  background: var(--green-dim);
+}
+.fstatus-pill[data-state="active"] .fstatus-dot {
+  background: var(--green);
+  animation: pulse-green 1.6s ease-in-out infinite;
+}
+.fstatus-pill[data-state="active"] .fstatus-text { color: var(--green); }
+
+/* error: red */
+.fstatus-pill[data-state="error"] {
+  border-color: var(--red);
+  background: rgba(255,90,90,0.08);
+}
+.fstatus-pill[data-state="error"] .fstatus-dot { background: var(--red); }
+.fstatus-pill[data-state="error"] .fstatus-text { color: var(--red); }
+
+/* disabled: muted, italic */
+.fstatus-pill[data-state="disabled"] { opacity: 0.45; }
+.fstatus-pill[data-state="disabled"] .fstatus-text { font-style: italic; }
 
 /* ── Main layout ── */
 .main {

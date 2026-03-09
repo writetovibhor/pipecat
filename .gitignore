@@ -68,3 +68,7 @@ whisker_setup.py
 
 # wav-tester
 examples/wav-tester/input/
+examples/wav-tester/results/
+examples/wav-tester/recordings/
+examples/wav-tester/input*/
+examples/wav-tester/scratch/

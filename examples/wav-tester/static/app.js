@@ -40,7 +40,12 @@ let nextPlayTime     = 0;      // next scheduled output audio time
 let monitorNextTime  = 0;      // next scheduled input monitor time
 let selectedFile     = null;   // { name, url }
 let silenceTimer     = null;   // for sending silence burst
-let deepFilterEnabled = false;  // mirrors server-side filter state
+let activeFilter     = 'none'; // 'none' | 'deepfilter' | 'quail'
+// ── End-of-conversation state ──────────────────────────────────────────────
+let wavPlaybackDone   = false;  // true after file reaches end
+let botStartedAfterEOF = false; // bot spoke at least once after EOF
+let eocTimer          = null;   // fires if no bot speech within EOC_NO_RESPONSE_MS
+const EOC_NO_RESPONSE_MS = 8000; // ms to wait for bot response before declaring EOC
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const connectBtn      = () => document.getElementById('connect-btn');
@@ -58,7 +63,7 @@ let _metricsSnapshot = null;   // latest session-level aggregates from server
 let _turnHistory     = [];     // one entry per turn, augmented with quality on arrival
 
 // ── Snapshot comparison store ───────────────────────────────────────────────
-let _snapshots = [];  // up to 2 entries: { label, filterOn, session, snr, noiseFloor, clipPct }
+let _snapshots = [];  // up to 2 entries: { label, filterName, session, snr, noiseFloor, clipPct }
 
 // ── Audio quality tracking ─────────────────────────────────────────────────
 let speechRmsSum  = 0, speechRmsCount  = 0;  // RMS during VAD-detected speech
@@ -230,6 +235,7 @@ async function onFileClick(itemEl, file) {
   pcmBuffer = null;
   playhead  = 0;
   resetAudioQuality();
+  resetEocState();
 
   selectedFile = file;
   fileNameLabel().textContent = file.name;
@@ -315,13 +321,15 @@ function connectWs() {
   log('Connecting to WebSocket…');
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}/ws`);
+  const recordOriginal = document.getElementById('record-original-cb')?.checked ? 'true' : 'false';
+  ws = new WebSocket(`${protocol}//${location.host}/ws?record_original=${recordOriginal}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
     setWsStatus('connected');
     connectBtn().textContent = 'Disconnect';
-    log('WebSocket connected', 'ok');
+    const recOrig = document.getElementById('record-original-cb')?.checked;
+    log(`WebSocket connected — recording: filtered input + bot output${recOrig ? ' + original input' : ''}`, 'ok');
     if (pcmBuffer) playBtn().disabled = false;
     loadFileList();  // refresh file list on connect
   };
@@ -331,10 +339,12 @@ function connectWs() {
     connectBtn().textContent = 'Connect';
     playBtn().disabled = true;
     if (isPlaying) pausePlayback(false);  // pause without sending silence
-    // Reset DeepFilter toggle — new connection always starts with filter off
-    deepFilterEnabled = false;
-    const dfCb = document.getElementById('deepfilter-checkbox');
-    if (dfCb) dfCb.checked = false;
+    // Reset filter selector — new connection always starts with no filter active
+    activeFilter = 'none';
+    const fSel = document.getElementById('filter-select');
+    if (fSel) fSel.value = 'none';
+    showFilterConfigPanel('none');
+    resetFilterStatus();
     log(`WebSocket closed (code ${ev.code})`, ev.wasClean ? 'info' : 'warn');
     ws = null;
   };
@@ -348,15 +358,58 @@ function connectWs() {
 
 function disconnectWs() {
   if (isPlaying) pausePlayback(false);
+  resetEocState();
   if (ws) ws.close();
 }
 
-// ── DeepFilter toggle ───────────────────────────────────────────────────────
-function onDeepFilterChange(checked) {
-  deepFilterEnabled = checked;
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'deepfilter_toggle', enable: checked }));
-    log(`DeepFilter noise suppression ${checked ? 'enabled' : 'disabled'}`, checked ? 'ok' : 'info');
+// ── Filter selection ─────────────────────────────────────────────────────────
+function showFilterConfigPanel(filterName) {
+  document.getElementById('deepfilter-config').style.display = filterName === 'deepfilter' ? '' : 'none';
+  document.getElementById('quail-config').style.display      = filterName === 'quail'      ? '' : 'none';
+}
+
+function onFilterSelectChange(filterName) {
+  activeFilter = filterName;
+  showFilterConfigPanel(filterName);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  if (filterName === 'deepfilter') {
+    ws.send(JSON.stringify({ type: 'filter_select', filter: 'deepfilter' }));
+    log('DeepFilterNet noise suppression enabled', 'ok');
+  } else if (filterName === 'quail') {
+    const modelId = document.getElementById('quail-model-select')?.value || 'quail-vf-l-16khz';
+    ws.send(JSON.stringify({ type: 'filter_select', filter: 'quail', model_id: modelId }));
+    log(`Quail speech enhancement enabled (${modelId})`, 'ok');
+  } else {
+    ws.send(JSON.stringify({ type: 'filter_select', filter: 'none' }));
+    log('Audio filter disabled', 'info');
+  }
+}
+
+function onQuailModelChange() {
+  if (activeFilter !== 'quail' || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const modelId = document.getElementById('quail-model-select')?.value || 'quail-vf-l-16khz';
+  ws.send(JSON.stringify({ type: 'quail_update', model_id: modelId }));
+  log(`Quail model updated: ${modelId}`, 'info');
+}
+
+function onAttenLimChange(value) {
+  const slider = document.getElementById('atten-slider');
+  const label  = document.getElementById('atten-value');
+  if (value === null) {
+    // Unlimited suppression
+    if (label) label.textContent = '∞';
+    if (slider) slider.value = 40;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'deepfilter_atten_lim', value: null }));
+      log('DeepFilter attenuation limit: unlimited (full suppression)', 'info');
+    }
+  } else {
+    const db = parseFloat(value);
+    if (label) label.textContent = db + ' dB';
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'deepfilter_atten_lim', value: db }));
+    }
   }
 }
 
@@ -390,6 +443,19 @@ function handleJsonMessage(msg) {
     case 'bot_speaking':
       botStatus().textContent = msg.value ? '🔊 Speaking…' : '';
       log(msg.value ? 'Bot started speaking' : 'Bot stopped speaking', 'bot');
+      if (msg.value && wavPlaybackDone) {
+        // Bot started speaking after file ended — cancel no-response timer
+        if (eocTimer) { clearTimeout(eocTimer); eocTimer = null; }
+        botStartedAfterEOF = true;
+      } else if (!msg.value && wavPlaybackDone && botStartedAfterEOF) {
+        // Bot finished speaking after file ended → conversation complete
+        log('✅ Conversation complete', 'ok');
+        wavPlaybackDone    = false;
+        botStartedAfterEOF = false;
+      }
+      break;
+    case 'filter_status':
+      onFilterStatus(msg);
       break;
     case 'metrics_update':
       onMetricsUpdate(msg);
@@ -400,6 +466,47 @@ function handleJsonMessage(msg) {
     default:
       log(`Server: ${JSON.stringify(msg)}`, 'info');
   }
+}
+
+// ── Filter status bar ───────────────────────────────────────────────────────
+
+const FSTATUS_LABELS = {
+  pending:  '—',
+  loading:  'loading…',
+  ready:    'ready',
+  inactive: 'ready',
+  active:   'active',
+  error:    'error',
+  disabled: 'not installed',
+};
+
+function onFilterStatus(msg) {
+  const { filter, state, detail } = msg;
+
+  // Show the bar the first time we get any status.
+  const bar = document.getElementById('filter-status-bar');
+  if (bar) bar.style.display = '';
+
+  const pill = document.getElementById('fstatus-' + filter);
+  const txt  = document.getElementById('fstatus-text-' + filter);
+  if (!pill || !txt) return;
+
+  pill.dataset.state = state;
+  const label = (state === 'error' && detail) ? detail
+              : (FSTATUS_LABELS[state] ?? state);
+  txt.textContent = label;
+  pill.title = detail || '';
+}
+
+function resetFilterStatus() {
+  const bar = document.getElementById('filter-status-bar');
+  if (bar) bar.style.display = 'none';
+  ['deepfilter', 'quail'].forEach(name => {
+    const pill = document.getElementById('fstatus-' + name);
+    const txt  = document.getElementById('fstatus-text-' + name);
+    if (pill) pill.dataset.state = 'pending';
+    if (txt)  txt.textContent = '—';
+  });
 }
 
 // ── Metrics panel ──────────────────────────────────────────────────────────
@@ -488,6 +595,30 @@ function onMetricsUpdate(msg) {
     setKpi('kv-wpm', Math.round(session.avg_speaking_rate_wpm) + ' wpm', wpmClass(session.avg_speaking_rate_wpm));
   if (session.avg_bot_word_count != null)
     setKpi('kv-response-len', Math.round(session.avg_bot_word_count) + ' w', wordsClass(session.avg_bot_word_count));
+
+  // Row 4: Active filter stats (shown whenever a filter is active)
+  if (msg.filter && msg.filter.active && msg.filter.active !== 'none') {
+    const f = msg.filter;
+    const filterRow = document.getElementById('filter-stats-row');
+    if (filterRow) filterRow.style.display = '';
+    if (f.avg_latency_ms != null)
+      setKpi('kv-filter-latency', fmtMs(f.avg_latency_ms), f.avg_latency_ms < 10 ? 'good' : f.avg_latency_ms < 30 ? 'warn' : 'bad');
+    if (f.avg_noise_reduction_db != null) {
+      document.getElementById('kpi-filter-noise-db').style.display = '';
+      setKpi('kv-filter-noise-db', f.avg_noise_reduction_db.toFixed(1) + ' dB',
+             f.avg_noise_reduction_db > 3 ? 'good' : f.avg_noise_reduction_db > 0 ? '' : 'warn');
+    } else {
+      // Noise reduction only available for DeepFilterNet — hide for Quail
+      document.getElementById('kpi-filter-noise-db').style.display = 'none';
+    }
+    // Active filter name + model
+    const activeEl = document.getElementById('kv-filter-active');
+    const modelEl  = document.getElementById('kv-filter-model');
+    if (activeEl) activeEl.textContent = f.active === 'deepfilter' ? 'DeepFilterNet' : 'Quail';
+    if (modelEl)  modelEl.textContent  = f.model || '';
+    // store for export
+    if (_metricsSnapshot) _metricsSnapshot.filter = f;
+  }
 
   // Store for JSON export
   _metricsSnapshot = { ...session };
@@ -700,10 +831,11 @@ function sendChunk() {
   }
 
   if (playhead >= pcmBuffer.length) {
-    log('End of file', 'ok');
+    log('📼 End of file — waiting for agent response…', 'ok');
     pausePlayback(true);   // send silence at end too
     playhead = 0;
     updateProgress();
+    onWavPlaybackComplete();
     return;
   }
 
@@ -746,6 +878,27 @@ function updateProgress() {
   const total    = pcmBuffer.length / SAMPLE_RATE;
   progressFill().style.width = `${(pct * 100).toFixed(2)}%`;
   timeDisplay().textContent  = `${formatTime(current)} / ${formatTime(total)}`;
+}
+
+// ── End-of-conversation detection ─────────────────────────────────────────
+function onWavPlaybackComplete() {
+  wavPlaybackDone    = true;
+  botStartedAfterEOF = false;
+  // If no bot speech starts within EOC_NO_RESPONSE_MS, consider it done.
+  if (eocTimer) clearTimeout(eocTimer);
+  eocTimer = setTimeout(() => {
+    eocTimer = null;
+    if (wavPlaybackDone && !botStartedAfterEOF) {
+      log('ℹ No agent response after file end — conversation complete', 'info');
+      wavPlaybackDone = false;
+    }
+  }, EOC_NO_RESPONSE_MS);
+}
+
+function resetEocState() {
+  wavPlaybackDone    = false;
+  botStartedAfterEOF = false;
+  if (eocTimer) { clearTimeout(eocTimer); eocTimer = null; }
 }
 
 // ── PCM conversion helpers ─────────────────────────────────────────────────
@@ -1024,6 +1177,30 @@ const METRIC_INFO = {
     ],
     note: 'LLM-as-judge is a heuristic. Cross-validate against human evaluation for critical deployments.',
   },
+  'filter-latency': {
+    label: 'Filter Processing Latency',
+    formula: 'avg wall-clock time per 10 ms audio chunk (active filter)',
+    description: 'Average time the active audio filter (DeepFilterNet or Quail) takes to process each 10 ms audio chunk. This adds directly to audio pipeline latency.',
+    why: 'If filter latency exceeds the chunk duration (~10 ms), the audio pipeline falls behind real-time. Compared across runs, it shows the overhead cost of noise suppression.',
+    ranges: [
+      { label: 'Real-time safe', cls: 'good', value: '< 10 ms' },
+      { label: 'Marginal',       cls: 'warn', value: '10 – 30 ms' },
+      { label: 'Too slow',       cls: 'bad',  value: '> 30 ms' },
+    ],
+    note: 'Only populated when a filter (DeepFilterNet or Quail) is active.',
+  },
+  'filter-noise-db': {
+    label: 'DeepFilterNet Noise Reduction',
+    formula: '20 × log₁₀(RMS_in / RMS_out) averaged over all processed chunks',
+    description: 'Average dB reduction in signal amplitude caused by DeepFilterNet. Positive values mean the filter attenuated audio; higher dB = more aggressive suppression. Not available for Quail.',
+    why: 'Shows how much noise was removed. Very high values during speech may indicate over-suppression (musical noise, artifacts). Compare STT confidence with/without filter to verify improvement.',
+    ranges: [
+      { label: 'Good suppression', cls: 'good', value: '3 – 15 dB' },
+      { label: 'Mild',             cls: '',      value: '0 – 3 dB' },
+      { label: 'Over-suppressing', cls: 'warn',  value: '> 15 dB' },
+    ],
+    note: 'Attenuation limit (atten_lim_db) caps this value. Set a lower limit to preserve voice naturalness.',
+  },
 };
 
 let _tooltipAnchor = null;  // the ⓘ button that opened the current tooltip
@@ -1176,9 +1353,9 @@ function copyMetricsJson() {
 function takeSnapshot() {
   if (!_metricsSnapshot) { log('No metrics yet — play through at least one turn first.', 'warn'); return; }
 
-  const idx    = _snapshots.length;
-  const label  = idx === 0 ? 'A' : 'B';
-  const filter = deepFilterEnabled;
+  const idx        = _snapshots.length;
+  const label      = idx === 0 ? 'A' : 'B';
+  const filterName = activeFilter;
 
   // Compute live audio quality from current client-side accumulators
   const speechRms = speechRmsCount > 0 ? speechRmsSum / speechRmsCount : null;
@@ -1193,7 +1370,7 @@ function takeSnapshot() {
 
   const snap = {
     label,
-    filterOn:   filter,
+    filterName,
     session:    { ..._metricsSnapshot, avg_quality: avgQuality },
     snrDb,
     noiseFloor: noiseRms != null ? +noiseRms.toFixed(5) : null,
@@ -1215,7 +1392,8 @@ function takeSnapshot() {
   btn.textContent = `✓ Saved ${label}`;
   btn.style.color = 'var(--green)';
   setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
-  log(`Snapshot ${label} saved (${filter ? 'DeepFilter ON' : 'No filter'}, ${snap.turnCount} turns)`, 'ok');
+  const filterLabel = filterName === 'none' ? 'No filter' : filterName === 'deepfilter' ? 'DeepFilterNet' : 'Quail';
+  log(`Snapshot ${label} saved (${filterLabel}, ${snap.turnCount} turns)`, 'ok');
 }
 
 function clearSnapshots() {
@@ -1233,11 +1411,12 @@ function renderComparison() {
   const b = _snapshots[1] || null;
 
   // Update column headers
+  const fmtFilterLabel = (name) => name === 'none' ? 'No filter' : name === 'deepfilter' ? 'DeepFilterNet' : 'Quail';
   document.getElementById('cmp-head-a').textContent =
-    `${a.label}: ${a.filterOn ? 'DeepFilter ON' : 'No filter'} · ${a.turnCount}t` +
+    `${a.label}: ${fmtFilterLabel(a.filterName)} · ${a.turnCount}t` +
     (a.file ? ` · ${a.file}` : '');
   document.getElementById('cmp-head-b').textContent = b
-    ? `${b.label}: ${b.filterOn ? 'DeepFilter ON' : 'No filter'} · ${b.turnCount}t` +
+    ? `${b.label}: ${fmtFilterLabel(b.filterName)} · ${b.turnCount}t` +
       (b.file ? ` · ${b.file}` : '')
     : '— take Snapshot B —';
 
